@@ -13,9 +13,11 @@ pub struct GameLogic { // here we define the data we use on our script
     fps: u32,
     player: GameObject,
     controls: Controls,
-    send_packet: Instant
+    send_packet: Instant,
+    pub last_packet_sent: Option<Packet>,
 } 
 
+#[derive(Serialize, Deserialize, PartialEq, Clone)]
 pub struct Controls {
     left: bool,
     right: bool,
@@ -23,10 +25,9 @@ pub struct Controls {
     down: bool
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 pub struct Packet {
-    x: f32,
-    y: f32,
+    controls: Controls
 }
 
 impl GameLogic {
@@ -60,7 +61,8 @@ impl GameLogic {
                 width: 40.0,
                 height: 40.0,
             },
-            send_packet: Instant::now()
+            send_packet: Instant::now(),
+            last_packet_sent: None
         }
     }
 
@@ -70,30 +72,28 @@ impl GameLogic {
         let delta_time = self.delta_time();
         self.display_framerate(delta_time);
         self.ui_elements[2].render(&mut app.canvas, &app.texture_creator, _font);
+        app.canvas.set_draw_color(Color::RGB(100, 100, 100));
 
+        // create the packet to send
+        let packet = Packet {
+            controls: self.controls.clone()
+        };
 
-        if self.controls.up {
-            self.player.y -= 500.0 * delta_time.as_secs_f32();
-            self.send_position(app);
-        } 
-        if self.controls.down {
-            self.player.y += 500.0 * delta_time.as_secs_f32();
-            self.send_position(app);
-
+        // send the packet or not based on the state of the packet itself
+        match &self.last_packet_sent {
+            Some(last_packet) => {
+                if last_packet == &packet {
+                    self.send_packet(app, &packet);
+                    self.last_packet_sent = Some(packet);
+                }
+            },
+            None => {
+                self.send_packet(app, &packet);
+                self.last_packet_sent = Some(packet);
+            },
         }
-        if self.controls.left {
-            self.player.x -= 500.0 * delta_time.as_secs_f32();
-            self.send_position(app);
 
-        } 
-        if self.controls.right {
-            self.player.x += 500.0 * delta_time.as_secs_f32();
-            self.send_position(app);
-
-        }
-
-        app.canvas.set_draw_color(Color::RGB(100, 100, 100)); // it must be a Color::RGB() or other
-
+        // handle recieving a response
         match &app.received {
             Some(connections) => {
                 for data in connections {
@@ -105,7 +105,7 @@ impl GameLogic {
                         match serde_json::from_str::<Packet>(&data.1) {
                             Ok(deserialized) => {
                                 // send this only 60 times per second
-                                app.canvas.fill_rect(Rect::new(deserialized.x as i32, deserialized.y as i32, self.player.width as u32, self.player.height as u32)).unwrap();
+                                // app.canvas.fill_rect(Rect::new(deserialized.x as i32, deserialized.y as i32, self.player.width as u32, self.player.height as u32)).unwrap();
                             },
                             Err(_) => {},
                         }
@@ -122,33 +122,36 @@ impl GameLogic {
     fn event_handler(&mut self, app_state: &mut AppState, event_pump: &mut sdl2::EventPump) {
         for event in event_pump.poll_iter() {
             match event {
-                sdl2::event::Event::KeyDown { keycode: Some(Keycode::Up), .. } => {
-                    self.controls.up = true;
+                sdl2::event::Event::KeyDown { keycode, .. } => {
+                    match keycode {
+                        Some(key) => {
+                            match key {
+                                Keycode::Up     => self.controls.up     = true,
+                                Keycode::Down   => self.controls.down   = true,
+                                Keycode::Left   => self.controls.left   = true,
+                                Keycode::Right  => self.controls.right  = true,
+                                
+                                _ => {}
+                            }
+                        },
+                        None => {},
+                    }
                 },
-                sdl2::event::Event::KeyUp { keycode: Some(Keycode::Up), .. } => {
-                    self.controls.up = false;
+                sdl2::event::Event::KeyUp { keycode, .. } => {
+                    match keycode {
+                        Some(key) => {
+                            match key {
+                                Keycode::Up     => self.controls.up     = false,
+                                Keycode::Down   => self.controls.down   = false,
+                                Keycode::Left   => self.controls.left   = false,
+                                Keycode::Right  => self.controls.right  = false,
+                                _ => {}
+                            }
+                        },
+                        None => {},
+                    }
                 },
-                sdl2::event::Event::KeyDown { keycode: Some(Keycode::Down), .. } => {
-                    self.controls.down = true;
-                },
-                sdl2::event::Event::KeyUp { keycode: Some(Keycode::Down), .. } => {
-                    self.controls.down = false;
-                },
-                sdl2::event::Event::KeyDown { keycode: Some(Keycode::Left), .. } => {
-                    self.controls.left = true;
-                },
-                sdl2::event::Event::KeyUp { keycode: Some(Keycode::Left), .. } => {
-                    self.controls.left = false;
-                },
-                sdl2::event::Event::KeyDown { keycode: Some(Keycode::Right), .. } => {
-                    self.controls.right = true;
-                },
-                sdl2::event::Event::KeyUp { keycode: Some(Keycode::Right), .. } => {
-                    self.controls.right = false;
-                },
-                Event::KeyDown { keycode: Some(Keycode::Escape), .. }  => {
-                    app_state.is_running = false;
-                }, Event::Quit { .. } => {
+                Event::Quit { .. } => {
                     app_state.is_running = false;
                 } 
                 _ => {}
@@ -159,8 +162,14 @@ impl GameLogic {
 
     // Test to instead of sending the position, just send the controllers state and let the server do the other stuff
 
+    // the controler packet will only be sent if there is a change on the controller struct
+    fn send_packet(&mut self, app: &mut App, packet: &Packet) {
+        app.socket.send_to(serde_json::to_string(&packet).unwrap().as_bytes(), app.connect_to.to_owned()).unwrap();
+        self.send_packet = Instant::now()
+    }
 
     // Test instead of sending info every time the player presses a button only a certian amount of times each second
+    /* 
     fn send_position(&mut self, app: &mut App) {
         let sendable = Packet {
             x: self.player.x,
@@ -172,6 +181,7 @@ impl GameLogic {
         self.send_packet = Instant::now()
     }
     }
+    */
 
     fn display_framerate(&mut self, delta_time: Duration) {
         self.frame_count += 1;

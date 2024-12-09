@@ -107,8 +107,6 @@ impl App {
                 }
             }
     
-            
-            
             match app_state.state {
                 GameState::Playing => {
                     play.update(&_font, &mut app_state, &mut event_pump, &mut self);
