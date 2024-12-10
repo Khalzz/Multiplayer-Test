@@ -12,32 +12,33 @@ mod ui {
     pub mod text;
 }
 
+mod engine {
+    pub mod time;
+}
+
 mod input {
     pub mod button_module;
 }
 
 mod gameplay {
     pub mod play;
+    pub mod server_game_logic;
 }
 
 mod networking {
     pub mod server;
 }
 
-struct Position {
-    src: SocketAddr,
-    data: String
-}
-
 fn main() -> Result<(), String> {
-    print!("{}[2J", 27 as char);
+    print!("{}[2J", 27 as char); // clean the terminal
 
     println!("You want to do a [server] or a [client]");
     let mut input = String::new();
     io::stdin().read_line(&mut input).expect("Failed to read line");
         
     if input.trim() == "server"{
-        Server::run();
+        let mut server = Server::new();
+        server.run();
     } else if input.trim() == "client" {
         println!("Enter the IP to connect");
         let mut ip = String::new();
@@ -52,8 +53,8 @@ fn main() -> Result<(), String> {
                     println!("Client started at:\n - ip: {}:{}", local_addr.ip(), local_addr.port());
                 
                     socket.send_to("Connected".as_bytes(), ip.trim().to_owned()).expect("Failed to send data");
-                
-                    let app = App::new("Arrowner", socket, ip.trim().to_owned());
+                    
+                    let app = App::new("Multiplayer Testing", socket, ip.trim().to_owned());
                     app.render();
                 }
             },

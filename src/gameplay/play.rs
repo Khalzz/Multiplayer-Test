@@ -1,8 +1,9 @@
-use std::{net::{IpAddr, SocketAddr}, time::{Duration, Instant}};
+use std::{collections::HashMap, net::{IpAddr, SocketAddr}, time::{Duration, Instant}};
 
+use rand::{distributions::Alphanumeric, Rng};
 use sdl2::{event::Event, keyboard::Keycode, pixels::Color, rect::Rect, ttf::Font};
 use serde::{Deserialize, Serialize};
-use crate::{app::{App, AppState}, game_object::GameObject, input::button_module::{Button, TextAlign}};
+use crate::{app::{App, AppState}, game_object::GameObject, gameplay::server_game_logic::Position, input::button_module::{Button, TextAlign}};
 
 pub struct GameLogic { // here we define the data we use on our script
     last_frame: Instant,
@@ -11,23 +12,28 @@ pub struct GameLogic { // here we define the data we use on our script
     frame_count: u32,
     frame_timer: Duration,
     fps: u32,
-    player: GameObject,
     controls: Controls,
     send_packet: Instant,
+    
+    // networking
     pub last_packet_sent: Option<Packet>,
+    pub instance_id: String, // this value is for id-ing the client instance
+    players: HashMap<String, GameObject>
+
 } 
 
 #[derive(Serialize, Deserialize, PartialEq, Clone)]
 pub struct Controls {
-    left: bool,
-    right: bool,
-    up: bool,
-    down: bool
+    pub left: bool,
+    pub right: bool,
+    pub up: bool,
+    pub down: bool
 }
 
 #[derive(Serialize, Deserialize, PartialEq)]
 pub struct Packet {
-    controls: Controls
+    pub controls: Controls,
+    pub id: String
 }
 
 impl GameLogic {
@@ -40,6 +46,14 @@ impl GameLogic {
 
         // UI LISTS
         let ui_elements = vec![ui_points, timer, framerate];
+
+        // we will send this value to the server so we can make differenciation between the user instance and the other players
+        // this value should be added based entirely on the connection of a new game
+        let instance_id: String = rand::thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
 
         Self {
             last_frame: Instant::now(),
@@ -54,35 +68,28 @@ impl GameLogic {
                 up: false,
                 down: false,
             },
-            player: GameObject {
-                active: true,
-                x: 10.0,
-                y: 10.0,
-                width: 40.0,
-                height: 40.0,
-            },
             send_packet: Instant::now(),
-            last_packet_sent: None
+            last_packet_sent: None,
+            instance_id,
+            players: HashMap::new()
         }
     }
 
     // this is called every frame
     pub fn update(&mut self, _font: &Font, mut app_state: &mut AppState, mut event_pump: &mut sdl2::EventPump, app: &mut App) {
-        
-        let delta_time = self.delta_time();
-        self.display_framerate(delta_time);
+        self.display_framerate(app);
         self.ui_elements[2].render(&mut app.canvas, &app.texture_creator, _font);
-        app.canvas.set_draw_color(Color::RGB(100, 100, 100));
 
         // create the packet to send
         let packet = Packet {
-            controls: self.controls.clone()
+            controls: self.controls.clone(),
+            id: self.instance_id.clone()
         };
 
         // send the packet or not based on the state of the packet itself
         match &self.last_packet_sent {
             Some(last_packet) => {
-                if last_packet == &packet {
+                if last_packet != &packet {
                     self.send_packet(app, &packet);
                     self.last_packet_sent = Some(packet);
                 }
@@ -93,28 +100,38 @@ impl GameLogic {
             },
         }
 
-        // handle recieving a response
         match &app.received {
-            Some(connections) => {
-                for data in connections {
-                    let local_addr = app.socket.local_addr().expect("Failed to get local address");
+            Some(returned) => {
+                for (id, position) in &returned.players_data {
+                    match self.players.get_mut(id) {
+                        Some(player) => {
+                            // if the player exists, just change the position of itself
+                            if *id == self.instance_id {
+                                app.canvas.set_draw_color(Color::RGB(100, 100, 200));
+                            } else {
+                                app.canvas.set_draw_color(Color::RGB(100, 100, 100));
+                            }
 
-                    if data.0 != &format!("{}:{}", local_addr.ip(), local_addr.port()) {
-                        let splitted: Vec<&str> = data.1.split("-").collect();
-                        // println!("{}", splitted[0]);
-                        match serde_json::from_str::<Packet>(&data.1) {
-                            Ok(deserialized) => {
-                                // send this only 60 times per second
-                                // app.canvas.fill_rect(Rect::new(deserialized.x as i32, deserialized.y as i32, self.player.width as u32, self.player.height as u32)).unwrap();
-                            },
-                            Err(_) => {},
-                        }
+                            player.x = position.x;
+                            player.y = position.y;
+                            app.canvas.fill_rect(Rect::new(player.x as i32, player.y as i32, player.width as u32, player.height as u32)).unwrap();
+                        },
+                        None => {
+                            // if the player dont exists, instance it in the map
+                            self.players.insert(id.to_string(), GameObject {
+                                active: true,
+                                x: position.x,
+                                y: position.y,
+                                width: 40.0,
+                                height: 40.0,
+                            });
+                        },
                     }
+
                 }
             },
             None => {},
         }
-        app.canvas.fill_rect(Rect::new(self.player.x as i32, self.player.y as i32, self.player.width as u32, self.player.height as u32)).unwrap();
 
         Self::event_handler(self, &mut app_state, &mut event_pump);
     }
@@ -183,26 +200,9 @@ impl GameLogic {
     }
     */
 
-    fn display_framerate(&mut self, delta_time: Duration) {
-        self.frame_count += 1;
-        self.frame_timer += delta_time;
-
-        // Calculate FPS every second
-        if self.frame_timer >= Duration::from_secs(1) {
-            self.fps = self.frame_count;
-            self.frame_count = 0;
-            self.frame_timer -= Duration::from_secs(1); // Remove one second from the timer
-        }
-
+    fn display_framerate(&mut self, app: &mut App) {
         // Render FPS text
-        let fps_text = format!("FPS: {}", self.fps);
+        let fps_text = format!("FPS: {}", app.time.get_fps());
         self.ui_elements[2].text = Some(fps_text);
-    }
-
-    fn delta_time(&mut self) -> Duration {
-        let current_time = Instant::now();
-        let delta_time = current_time.duration_since(self.last_frame); // this is our Time.deltatime
-        self.last_frame = current_time;
-        return delta_time
     }
 }

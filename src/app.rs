@@ -3,12 +3,16 @@ use std::env;
 
 use std::io::ErrorKind;
 use std::net::UdpSocket;
+use rand::distributions::Alphanumeric;
+use rand::Rng;
 use sdl2::pixels::Color;
 use sdl2::render::TextureCreator;
 use sdl2::video::WindowContext;
 use sdl2::{video::Window, Sdl, render::Canvas};
 use serde::{Deserialize, Serialize};
+use crate::engine::time::Timing;
 use crate::gameplay::play;
+use crate::gameplay::server_game_logic::Returnable;
 
 pub enum GameState {
     Playing,
@@ -32,7 +36,8 @@ pub struct App {
     pub texture_creator: TextureCreator<WindowContext>,
     pub socket: UdpSocket,
     pub connect_to: String,
-    pub received: Option<HashMap<String, String>>
+    pub received: Option<Returnable>,
+    pub time: Timing
 }
 
 impl App {
@@ -46,13 +51,15 @@ impl App {
         let width = current_display.w as u32;
         let height = current_display.h as u32;
 
-        env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0"); // this is highly needed so the sdl2 can alt tab without generating bugs
+        env::set_var("SDL_VIDEO_MINIMIZE_ON_FOCUS_LOSS", "0");
 
         let window = video_susbsystem.window(title, 1280, 720 as u32).vulkan().build().expect("The window wasn't created");
         let mut canvas = window.into_canvas().accelerated().present_vsync().build().expect("the canvas wasn't builded");
         
         canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
         let texture_creator = canvas.texture_creator();
+
+        let time = Timing::new();
 
         App {
             context,
@@ -62,11 +69,10 @@ impl App {
             texture_creator,
             socket,
             connect_to,
-            received: None
+            received: None,
+            time
         }
     }
-
-    
 
     pub fn render(mut self) {
         let mut app_state = AppState { is_running: true, state: GameState::Playing };
@@ -82,7 +88,7 @@ impl App {
         let mut buf = [0; 1024];
 
         while app_state.is_running {
-            
+            self.time.update();
             self.canvas.set_draw_color(Color::RGBA(40, 40, 40, 100));
             self.canvas.clear();
 
@@ -90,11 +96,15 @@ impl App {
                 Ok((amt, src)) => {
                     // println!("Received {} bytes from {}", amt, src);
                     let received = std::str::from_utf8(&buf[..amt]).unwrap();
-                    match serde_json::from_str(&received) {
+                    let deserialized_option: Result<Returnable, serde_json::Error> = serde_json::from_str(&received);
+                    
+                    match deserialized_option {
                         Ok(deserialized) => {
-                            self.received = deserialized
+                            self.received = Some(deserialized)
                         },
-                        Err(_) => {},
+                        Err(err) => {
+                            eprintln!("Something went wrong when deserializing the received data: {}", err);
+                        },
                     }
                 },
                 Err(ref err) if err.kind() == ErrorKind::WouldBlock => {
